@@ -28,6 +28,7 @@ class PSRefreshWorker(QThread):
     data_ready = pyqtSignal(str)
     
     def run(self):
+        # FIX: Explicitly iterating adapters to prevent $_ pipeline variable conflicts
         cmd = """
         @(Get-VM | Select-Object Name, 
             @{N='State';E={$_.State.ToString()}}, 
@@ -35,7 +36,21 @@ class PSRefreshWorker(QThread):
             @{N='IPs';E={$_.NetworkAdapters.IPAddresses -join ', '}},
             @{N='MACAddress';E={$_.NetworkAdapters.MacAddress -join ', '}},
             @{N='SwitchName';E={$_.NetworkAdapters.SwitchName -join ', '}},
-            @{N='VLAN';E={$_.NetworkAdapters.VlanList -join ', '}},
+            @{N='VLAN';E={
+                $vlanList = @()
+                $adapters = Get-VMNetworkAdapter -VM $_
+                foreach ($adapter in $adapters) {
+                    $vlanInfo = Get-VMNetworkAdapterVlan -VMNetworkAdapter $adapter
+                    if ($vlanInfo.OperationMode -eq 'Trunk') {
+                        $vlanList += "Trunk ($($vlanInfo.AllowedVlanIdList))"
+                    } elseif ($vlanInfo.AccessVlanId -gt 0) {
+                        $vlanList += [string]$vlanInfo.AccessVlanId
+                    } else {
+                        $vlanList += 'Untagged'
+                    }
+                }
+                if ($vlanList.Count -eq 0) { 'Untagged' } else { $vlanList -join ', ' }
+            }},
             @{N='UptimeSec';E={if ($_.Uptime) { [math]::Round($_.Uptime.TotalSeconds) } else { 0 }}},
             CPUUsage, MemoryAssigned
         ) | ConvertTo-Json -Depth 5
@@ -45,8 +60,8 @@ class PSRefreshWorker(QThread):
                                  capture_output=True, text=True, creationflags=0x08000000)
             if res.returncode == 0 and res.stdout.strip():
                 self.data_ready.emit(res.stdout.strip())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"PS Worker Error: {e}")
 
 # --- Custom Details Dialogs ---
 class RichInfoDialog(QDialog):
@@ -454,7 +469,7 @@ class VMCard(QGraphicsRectItem):
         # 1. DEFINE ATTRIBUTES FIRST
         self.display_options = display_options or vm_data.get('display_options', {
             'State': True, 'IP': True, 'Uptime': True, 
-            'MAC': False, 'Switch': False, 'VLAN': True, 'CPU': False, 'RAM': False
+            'MAC': False, 'Switch': True, 'VLAN': False, 'CPU': False, 'RAM': False
         })
         self.vm_data['display_options'] = self.display_options
         
@@ -601,8 +616,24 @@ class VMCard(QGraphicsRectItem):
             cpu = self.vm_data.get('CPUUsage', '0')
             html_lines.append(f"CPU: {cpu}%")
         if self.display_options.get('VLAN', False):
-            vlan = self.vm_data.get('VLAN', 'N/A') or 'N/A'
-            html_lines.append(f"VLAN: {vlan}")
+            vlan_raw = str(self.vm_data.get('VLAN', 'N/A'))
+            
+            if vlan_raw in ['N/A', '', 'None']:
+                vlan_str = 'N/A'
+            else:
+                # Split the string in case of multiple network adapters
+                vlans = [v.strip() for v in vlan_raw.split(',')]
+                
+                # Convert any '0' to 'Untagged'
+                vlans = ['Untagged' if v == '0' else v for v in vlans]
+                
+                # If ALL adapters are untagged, just show "Untagged" once to save space
+                if all(v == 'Untagged' for v in vlans):
+                    vlan_str = 'Untagged'
+                else:
+                    vlan_str = ', '.join(vlans)
+                    
+            html_lines.append(f"VLAN: {vlan_str}")
         if self.display_options.get('RAM', False):
             ram = self.vm_data.get('MemoryAssigned', '0')
             try:
@@ -617,12 +648,12 @@ class VMCard(QGraphicsRectItem):
         num_lines = len(html_lines)
         new_height = max(100, 35 + (num_lines * 16))
         
-        # Keep width static, stretch vertically
-        rect = self.boundingRect()
-        self.setRect(0, 0, rect.width(), new_height)
+        # FIX: Use self.rect() instead of self.boundingRect()
+        current_rect = self.rect()
+        self.setRect(0, 0, current_rect.width(), new_height)
         
         # Lock info button to the top right corner
-        self.info_btn.setPos(rect.width() - 25, 5)
+        self.info_btn.setPos(current_rect.width() - 25, 5)
 
         # Tell scene to adapt connection arrows to the new shape sizes
         if self.scene():
@@ -833,7 +864,7 @@ class HyperVDashboard(QMainWindow):
         # Set up global view filters
         self.display_options = {
             'State': True, 'IP': True, 'Uptime': True, 
-            'MAC': False, 'Switch': False, 'VLAN': True, 'CPU': False, 'RAM': False
+            'MAC': False, 'Switch': True, 'VLAN': False, 'CPU': False, 'RAM': False
         }
         
         # Central Canvas Setup
@@ -971,7 +1002,8 @@ class HyperVDashboard(QMainWindow):
         vm_to_id = {}
         for idx, item in enumerate([i for i in self.scene.items() if isinstance(i, VMCard)]):
             vm_to_id[item] = idx
-            data['vms'].append({'id': idx, 'data': item.vm_data, 'x': item.x(), 'y': item.y()})
+            # FIX: Force absolute global coordinates with scenePos()
+            data['vms'].append({'id': idx, 'data': item.vm_data, 'x': item.scenePos().x(), 'y': item.scenePos().y()})
 
         for conn in self.scene.connections:
             if conn.source in vm_to_id and conn.target in vm_to_id:
@@ -987,14 +1019,14 @@ class HyperVDashboard(QMainWindow):
         for item in self.scene.items():
             if isinstance(item, ZoneBox):
                 data['zones'].append({
-                    'name': item.name, 'x': item.x(), 'y': item.y(), 
+                    'name': item.name, 'x': item.scenePos().x(), 'y': item.scenePos().y(), 
                     'width': item.rect().width(), 'height': item.rect().height(),
                     'bg_color': item.bg_color
                 })
             elif isinstance(item, CommentBox):
-                data['comments'].append({'text': item.toHtml(), 'x': item.x(), 'y': item.y()})
+                data['comments'].append({'text': item.toHtml(), 'x': item.scenePos().x(), 'y': item.scenePos().y()})
             elif isinstance(item, ResizableImage):
-                data['images'].append({'path': item.filepath, 'x': item.x(), 'y': item.y(), 'scale': item.scale()})
+                data['images'].append({'path': item.filepath, 'x': item.scenePos().x(), 'y': item.scenePos().y(), 'scale': item.scale()})
                 
         with open(file_path, 'w') as f:
             json.dump(data, f)
