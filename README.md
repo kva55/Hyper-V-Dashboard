@@ -11,6 +11,12 @@ A Python tool that uses PowerShell to pull VMs and allows graphical visualizatio
 ## Creating executable
 ``python -m PyInstaller --onefile hypervd.py`` - requires pyinstaller
 
+## Example of usage
 <div align="center"">
-<img width="1493" height="1002" alt="image" src="https://github.com/user-attachments/assets/fc6a739e-46e5-41c5-81dc-669a5b871ec3" />
+<img width="1256" height="1003" alt="image" src="https://github.com/user-attachments/assets/a2aedc3a-fa0e-4603-9302-753ce2a4b4cf" />
+</div>
+
+#Saving and loading canvas
+<div align="center"">
+<img width="1181" height="670" alt="image" src="https://github.com/user-attachments/assets/7e65478a-8f9e-4f4b-bf75-d9aa362a248f" />
 </div>
